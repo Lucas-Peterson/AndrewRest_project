@@ -1,10 +1,10 @@
 import sqlite3
 import time
-
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ParseMode
 from aiogram.utils import executor
-from aiogram.types.message import ContentType
+from aiogram.types import ContentType
+
 
 bot = Bot(token="YOUR_TOKEN")
 dp = Dispatcher(bot)
@@ -32,16 +32,15 @@ async def handle_message(message: types.Message):
         if not users:
             await message.answer("К сожалению, я не могу найти пользователей.")
             return
-
-        # Обновляем очки пользователей
         for user in users:
-            username = user['user']['username']
+            user_id = user[0]
+            username = user[1]
             # Добавляем пользователя в базу данных, если его там еще нет
-            cursor.execute('INSERT OR IGNORE INTO users (nickname, score) VALUES (?, 0)', (username,))
+            cursor.execute('INSERT OR IGNORE INTO users (user_id, nickname, score) VALUES (?, ?, 0)',
+                           (user_id, username))
             # Увеличиваем баллы пользователя на 1
-            cursor.execute('UPDATE users SET score = score + 1 WHERE nickname = ?', (username,))
+            cursor.execute('UPDATE users SET score = score + 1 WHERE user_id = ?', (user_id,))
             conn.commit()
-
 
         await message.answer("Бот записал всех пользователей")
 
@@ -52,7 +51,7 @@ async def show_command(message: types.Message):
     cursor.execute('SELECT nickname, score FROM users ORDER BY score DESC')
     users = cursor.fetchall()
     if not users:
-        await message.answer("К сожалению тир лист пуст(((")
+        await message.answer("К сожалению, тир лист пуст(((")
         return
 
     # Формируем сообщение со списком пользователей и их баллами
