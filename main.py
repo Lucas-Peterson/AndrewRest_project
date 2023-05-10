@@ -1,123 +1,104 @@
 import sqlite3
-import csv
-
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ParseMode
+import re
+from aiogram import Bot, Dispatcher
+from aiogram.types import Message
+from aiogram.dispatcher.filters import Command
 from aiogram.utils import executor
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
+from aiogram.dispatcher import FSMContext
 
 
-bot = Bot(token="5938916690:AAHOOZ08Cxf3ARylBtqDk4fMJqtB0lOwPLk")
-dp = Dispatcher(bot)
+class CancelState(StatesGroup):
+    waiting_for_usernames = State()
 
 # Создаем подключение к базе данных
 conn = sqlite3.connect('users.db')
 cursor = conn.cursor()
 
-# Создаем таблицу, если она еще не создана
-cursor.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, nickname TEXT, score INTEGER)')
+# Создаем таблицу для хранения данных о пользователях
+cursor.execute('''CREATE TABLE IF NOT EXISTS users
+                  (user_id INTEGER PRIMARY KEY, user_name TEXT, points INTEGER)''')
+conn.commit()
+
+bot = Bot(token="5938916690:AAHOOZ08Cxf3ARylBtqDk4fMJqtB0lOwPLk")
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 
 
-# Обработчик команды start
 @dp.message_handler(commands=['start'])
-async def start_command(message: types.Message):
-    await message.answer("Bot ready to work")
+async def process_start_command(message: Message):
+    # Приветственное сообщение
+    await bot.send_message(message.chat.id, "Привет! Отправь сообщение с никами пользователей. Если нужно удалить, то используй /cancel. Показ стата /show")
 
 
-# Ищем пользователя в базе данных по id
-async def get_user_by_id(user_id: int):
-    cursor.execute('SELECT id, nickname, score FROM users WHERE id = ?', (user_id,))
-    return cursor.fetchone()
+@dp.message_handler()
+async def handle_message(message: Message):
+    # Извлекаем текст сообщения
+    message_text = message.text
 
+    # Извлекаем все упоминания пользователей из текста сообщения
+    users_mentions = re.findall(r'@(\w+)', message_text)
 
-# Добавляем пользователя в базу данных
-async def add_user(user_id: int, nickname: str):
-    cursor.execute('INSERT INTO users (id, nickname, score) VALUES (?, ?, 0)', (user_id, nickname))
-    conn.commit()
-
-
-# Увеличиваем баллы пользователя на 1
-async def update_user_score(user_id: int, new_score: int):
-    cursor.execute('UPDATE users SET score = ? WHERE id = ?', (new_score, user_id))
-    conn.commit()
-
-
-async def handle_message(message: types.Message):
-    if message.text.startswith('#благодарю'):
-        # Ищем упоминания пользователей в тексте сообщения
-        mentions = []
-        for entity in message.entities:
-            if entity.type == 'mention':
-                if entity.user and entity.user.id is not None:
-                    mentions.append(entity.user.id)
-                else:
-                    mention_text = message.text[entity.offset:entity.offset + entity.length]
-                    mentions.append(mention_text.strip('@'))
-        if not mentions:
-            await message.answer("К сожалению, я не могу найти пользователей.")
-            return
-        for user_id in mentions:
-            # Ищем пользователя в базе данных
-            user_data = await get_user_by_id(user_id)
-            if user_data:
-                # Если пользователь найден, увеличиваем его баллы на 1
-                user_id, nickname, score = user_data
-                await update_user_score(user_id, score + 1)
+    # Если есть упоминания пользователей, добавляем очки каждому из них
+    if users_mentions:
+        for user_mention in users_mentions:
+            cursor.execute("SELECT * FROM users WHERE user_name=?", (user_mention,))
+            user = cursor.fetchone()
+            if user is None:
+                cursor.execute("INSERT INTO users VALUES (?, ?, ?)", (None, user_mention, 1))
             else:
-                # Если пользователь не найден, добавляем его в базу данных
-                if isinstance(user_id, str):
-                    nickname = user_id
-                else:
-                    nickname = (await bot.get_chat_member(message.chat.id, user_id)).user.username
-                await add_user(user_id, nickname)
-        await message.answer("Бот записал всех пользователей")
+                cursor.execute("UPDATE users SET points=? WHERE user_name=?", (user[2]+1, user_mention))
+        conn.commit()
+
+    await message.answer("Записал все ники")
 
 
-# Обработчик команды show
-@dp.message_handler(commands=['show'])
-async def show_command(message: types.Message):
-    # Извлекаем всех пользователей из базы данных
-    cursor.execute('SELECT nickname, score FROM users ORDER BY score DESC')
+# Обработчик команды /show
+@dp.message_handler(Command("show"))
+async def cmd_show(message: Message):
+    # Получаем данные всех пользователей и формируем сообщение
+    cursor.execute("SELECT user_name, points FROM users")
     users = cursor.fetchall()
-    if not users:
-        await message.answer("К сожалению, тир лист пуст(((")
-        return
-
-    # Формируем сообщение со списком пользователей и их баллами
-    response = "<b>Топ пользователей:</b>\n\n"
+    message_text = "Текущие баллы:\n"
     for user in users:
-        response += f"{user[0]}: {user[1]}\n"
+        message_text += f"{user[0]} | {user[1]}\n"
 
-    await message.answer(response, parse_mode=ParseMode.HTML)
-
-    # Записываем базу данных в файл CSV
-    with open('users.csv', 'w', encoding='utf-8', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['Nickname', 'Score'])
-        for user in users:
-            writer.writerow([user[0], user[1]])
-
-    # Отправляем файл пользователю
-    with open('users.csv', 'rb') as file:
-        await message.answer_document(file)
+    # Отправляем сообщение с текущими баллами
+    await message.answer(message_text)
 
 
-# Обработчик команды cancel
-@dp.message_handler(commands=['cancel'])
-async def cancel_command(message: types.Message):
-    # Получаем сообщение, на которое данное сообщение является ответом
-    reply_to_message = message.reply_to_message
-    if not reply_to_message:
-        await message.answer("К сожалению, я не могу найти сообщение, на которое вы хотите ответить.")
+# Обработчик команды /cancel
+@dp.message_handler(Command("cancel"))
+async def cmd_cancel(message: Message):
+
+    await CancelState.waiting_for_usernames.set()
+
+    await message.answer("Введите ники для удаления")
+
+
+# Обработчик сообщений в состоянии "waiting_for_usernames"
+@dp.message_handler(state=CancelState.waiting_for_usernames)
+async def process_usernames(message: Message, state: FSMContext):
+    # Извлекаем ники из сообщения
+    usernames = []
+    for entity in message.entities:
+        if entity.type == "mention":
+            usernames.append(entity.user.username)
+    if not usernames:
+        await message.answer("Не найдено упоминаний пользователей. Попробуйте еще раз")
         return
 
-    # Получаем id пользователя, на которого было данное сообщение ответом
-    user_id = reply_to_message.from_user.id
-
-    # Уменьшаем баллы пользователя на 1
-    cursor.execute('UPDATE users SET score = score - 1 WHERE id = ?', (user_id,))
+    # Вычитаем баллы у пользователей и записываем изменения в БД
+    for username in usernames:
+        cursor.execute("SELECT * FROM users WHERE user_name=?", (username,))
+        user = cursor.fetchone()
+        if user is not None:
+            cursor.execute("UPDATE users SET points=? WHERE user_id=?", (user[2]-1, user[0]))
     conn.commit()
 
-    await message.answer("Бот уменьшил баллы данному пользователю.")
+    await message.answer("Баллы вычтены")
+    await state.finish()
 
 
 if __name__ == '__main__':
